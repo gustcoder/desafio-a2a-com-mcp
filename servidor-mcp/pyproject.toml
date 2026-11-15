@@ -2,7 +2,7 @@
 name = "servidor-mcp-central-de-salas"
 version = "1.0.0"
 description = "Servidor MCP (Streamable HTTP) da Central de Salas"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "mcp==2.3.0",
     "uvicorn==0.54.0",

@@ -7,6 +7,7 @@ um estado terminal) seja impossível em vez de só "não acontecer".
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import sys
 from dataclasses import dataclass, field
@@ -51,6 +52,8 @@ class Tarefa:
     mensagem_status: dict[str, Any] | None = None
     historico: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    # Serializa as mensagens da mesma Task; Tasks diferentes andam em paralelo.
+    trava: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     @property
     def terminal(self) -> bool:

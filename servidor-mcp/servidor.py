@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 import uvicorn
@@ -119,7 +120,7 @@ class Escolha(BaseModel):
 # Tools
 # ---------------------------------------------------------------------------
 
-def _validar(sala: str, inicio: str, fim: str):
+def _validar(sala: str, inicio: str, fim: str) -> tuple[datetime, datetime]:
     try:
         return dominio.validar(sala, inicio, fim)
     except dominio.ErroDeRegra as e:

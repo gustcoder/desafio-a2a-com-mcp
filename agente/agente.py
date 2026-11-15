@@ -11,11 +11,9 @@ tem como saber disso (opacidade do A2A), e o resultado é determinístico.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -82,8 +80,6 @@ class ErroJsonRpc(Exception):
 
 
 registro = RegistroDeTarefas()
-# Uma trava por Task: duas mensagens para a mesma Task não se atropelam.
-travas: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def _texto_da_mensagem(mensagem: dict[str, Any]) -> str:
@@ -108,15 +104,18 @@ async def send_message(params: dict[str, Any], request: Request) -> dict[str, An
     if mensagem.get("role") != "ROLE_USER":
         raise ErroJsonRpc(INVALID_PARAMS, "message.role deve ser ROLE_USER")
     texto = _texto_da_mensagem(mensagem)
+    task_id, context_id = mensagem.get("taskId"), mensagem.get("contextId")
+    for nome, valor in (("taskId", task_id), ("contextId", context_id)):
+        if valor is not None and not isinstance(valor, str):
+            raise ErroJsonRpc(INVALID_PARAMS, f"message.{nome} deve ser string")
     ponte: Ponte = request.app.state.ponte
-    task_id = mensagem.get("taskId")
 
     if task_id:
         # Continuação de uma Task existente.
         tarefa = registro.obter(task_id)
         if tarefa is None:
             raise ErroJsonRpc(TASK_NOT_FOUND, f"Task nao encontrada: {task_id}")
-        async with travas[task_id]:
+        async with tarefa.trava:
             if tarefa.terminal:
                 # Estado terminal é definitivo: nada volta a WORKING.
                 raise ErroJsonRpc(
@@ -125,14 +124,14 @@ async def send_message(params: dict[str, Any], request: Request) -> dict[str, An
                 )
             if tarefa.estado != INPUT_REQUIRED:
                 raise ErroJsonRpc(UNSUPPORTED_OPERATION, f"Task {task_id} nao esta aguardando entrada")
-            if mensagem.get("contextId") not in (None, tarefa.context_id):
+            if context_id not in (None, tarefa.context_id):
                 raise ErroJsonRpc(INVALID_PARAMS, "contextId nao corresponde ao da Task")
             tarefa.registrar_usuario(mensagem)
             await ponte.continuar(tarefa, texto)
     else:
         # Sem taskId: Task nova, com id e contextId próprios.
-        tarefa = registro.criar(mensagem.get("contextId"))
-        async with travas[tarefa.id]:
+        tarefa = registro.criar(context_id)
+        async with tarefa.trava:
             tarefa.registrar_usuario(mensagem)
             # O trace-id do cliente acompanha todos os requests MCP desta Task.
             trace = Trace.de_header(request.headers.get("traceparent"))
@@ -174,7 +173,9 @@ async def endpoint_a2a(request: Request) -> JSONResponse:
         return _resposta(None, erro=ErroJsonRpc(INVALID_REQUEST, "request JSON-RPC 2.0 invalido"))
     id_, metodo = corpo.get("id"), corpo["method"]
     params = corpo.get("params") if isinstance(corpo.get("params"), dict) else {}
-    alvo = params.get("id") or (params.get("message") or {}).get("taskId") or "-"
+    # Só para o log; não pode quebrar com params malformados (a validação é do handler).
+    mensagem = params.get("message")
+    alvo = params.get("id") or (mensagem.get("taskId") if isinstance(mensagem, dict) else None) or "-"
     log(f"[a2a] method={metodo} id={json.dumps(id_)} task={alvo} traceparent={request.headers.get('traceparent', '-')}")
 
     handler = METODOS.get(metodo)
