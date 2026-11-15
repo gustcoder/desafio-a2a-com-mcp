@@ -25,8 +25,10 @@ from typing import Any
 from mcp_types import ElicitResult
 
 from cliente_mcp import (
+    ArgumentosIncompletos,
     ClienteMCP,
     Concluido,
+    ErroDeProtocolo,
     FalhaDaTool,
     PedeEntrada,
     Trace,
@@ -49,28 +51,33 @@ class PedidoInvalido(Exception):
     pass
 
 
-@dataclass
-class Pausa:
-    """Tudo que a Task precisa para retomar. Vive só aqui, por id de Task.
-
-    `pedido.request_state` é guardado e ecoado sem modificação: o agente nunca
-    abre, interpreta nem reconstrói esse valor.
-    """
+@dataclass(frozen=True)
+class Contexto:
+    """O tools/call original de uma Task: o que o retry precisa repetir igual."""
 
     trace: Trace
     tool: str
     argumentos: dict[str, Any]
     versao_politica: str
+
+
+@dataclass(frozen=True)
+class Pausa:
+    """Uma Task pausada: o tools/call original e o pedido de input do servidor.
+
+    `pedido.request_state` é guardado e ecoado sem modificação: o agente nunca
+    abre, interpreta nem reconstrói esse valor.
+    """
+
+    contexto: Contexto
     pedido: PedeEntrada
 
 
 def interpretar_pedido(texto: str) -> dict[str, str]:
     """Formato fixo: reservar sala=<id> inicio=<iso8601> fim=<iso8601> responsavel=<nome>."""
     verbo, _, resto = texto.strip().partition(" ")
-    if verbo != "reservar":
-        raise PedidoInvalido(USO)
     campos = {k: v.strip() for k, v in _CAMPO.findall(resto)}
-    if not campos:
+    if verbo != "reservar" or not campos:
         raise PedidoInvalido(USO)
     return campos
 
@@ -93,32 +100,32 @@ class Ponte:
         self._pausas: dict[str, Pausa] = {}
 
     async def iniciar(self, tarefa: Tarefa, texto: str, trace: Trace) -> None:
-        """Primeiro SendMessage: abre o trabalho e faz o tools/call inicial."""
+        """Primeiro SendMessage: descobre, lê a política e faz o tools/call inicial."""
         tarefa.mudar(WORKING)
         try:
             campos = interpretar_pedido(texto)
             tools = await self._mcp.descobrir_tools(trace)
             if TOOL_RESERVA not in tools:
-                raise PedidoInvalido(f"O servidor MCP nao oferece a tool {TOOL_RESERVA}")
+                raise ErroDeProtocolo(f"o servidor nao oferece a tool {TOOL_RESERVA}")
             argumentos = montar_argumentos(tools[TOOL_RESERVA], campos)
-        except (PedidoInvalido, ValueError) as e:
-            tarefa.mudar(FAILED, str(e) if isinstance(e, PedidoInvalido) else f"{USO} ({e})")
+            versao = await self._mcp.ler_versao_politica(trace)
+            contexto = Contexto(trace, TOOL_RESERVA, argumentos, versao)
+            resultado = await self._mcp.chamar_tool(contexto.tool, contexto.argumentos, trace)
+        except PedidoInvalido as e:
+            tarefa.mudar(FAILED, str(e))
+            return
+        except ArgumentosIncompletos as e:
+            tarefa.mudar(FAILED, f"{USO} ({e})")
             return
         except Exception as e:  # servidor MCP fora do ar, erro de protocolo...
             tarefa.mudar(FAILED, _falha_mcp(e))
             return
-        try:
-            versao = await self._mcp.ler_versao_politica(trace)
-            resultado = await self._mcp.chamar_tool(TOOL_RESERVA, argumentos, trace)
-        except Exception as e:
-            tarefa.mudar(FAILED, _falha_mcp(e))
-            return
-        self._aplicar(tarefa, resultado, trace, TOOL_RESERVA, argumentos, versao)
+        self._aplicar(tarefa, resultado, contexto)
 
     async def continuar(self, tarefa: Tarefa, texto: str) -> None:
         """SendMessage de continuação, com a Task em TASK_STATE_INPUT_REQUIRED."""
         pausa = self._pausas[tarefa.id]
-        pedido = pausa.pedido
+        contexto, pedido = pausa.contexto, pausa.pedido
         escolha = interpretar_escolha(texto)
 
         # Escolha malformada ou fora do enum: a Task continua pausada e repete
@@ -142,9 +149,9 @@ class Ponte:
             # (gerado pelo SDK), resposta sob a MESMA chave do inputRequests e
             # o requestState ecoado exatamente como chegou.
             resultado = await self._mcp.chamar_tool(
-                pausa.tool,
-                pausa.argumentos,
-                pausa.trace,
+                contexto.tool,
+                contexto.argumentos,
+                contexto.trace,
                 input_responses={pedido.chave: resposta},
                 request_state=pedido.request_state,
             )
@@ -152,21 +159,13 @@ class Ponte:
             self._pausas.pop(tarefa.id, None)
             self._encerrar(tarefa, FAILED, _falha_mcp(e, pedido.request_state))
             return
-        self._aplicar(tarefa, resultado, pausa.trace, pausa.tool, pausa.argumentos, pausa.versao_politica)
+        self._aplicar(tarefa, resultado, contexto)
 
-    def _aplicar(
-        self,
-        tarefa: Tarefa,
-        resultado: Concluido | FalhaDaTool | PedeEntrada,
-        trace: Trace,
-        tool: str,
-        argumentos: dict[str, Any],
-        versao: str,
-    ) -> None:
+    def _aplicar(self, tarefa: Tarefa, resultado: Concluido | FalhaDaTool | PedeEntrada, contexto: Contexto) -> None:
         """Traduz o resultado MCP em estado da Task."""
         if isinstance(resultado, PedeEntrada):
             # >>> A PONTE: input_required do MCP vira TASK_STATE_INPUT_REQUIRED.
-            self._pausas[tarefa.id] = Pausa(trace, tool, argumentos, versao, resultado)
+            self._pausas[tarefa.id] = Pausa(contexto, resultado)
             tarefa.mudar(INPUT_REQUIRED, linha_alternativas(resultado.opcoes))
             return
 
@@ -183,7 +182,7 @@ class Ponte:
             return
 
         reserva = {k: dados.get(k) for k in ("reserva", "sala", "inicio", "fim", "responsavel")}
-        reserva["politica"] = versao  # versão lida do resource pelo próprio agente
+        reserva["politica"] = contexto.versao_politica  # versão lida do resource pelo próprio agente
         tarefa.anexar_artifact("reserva", json.dumps(reserva, ensure_ascii=False))
         self._encerrar(tarefa, COMPLETED, f"Reserva {reserva['reserva']} confirmada na {reserva['sala']}.")
 

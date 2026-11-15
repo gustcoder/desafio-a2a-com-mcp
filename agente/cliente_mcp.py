@@ -72,7 +72,6 @@ class Concluido:
     """`complete` sem isError: a tool terminou."""
 
     dados: dict[str, Any] | None  # structuredContent
-    texto: str
 
 
 @dataclass
@@ -100,6 +99,14 @@ class PedeEntrada:
 
 class ErroDeProtocolo(Exception):
     """Algo no protocolo que o agente não sabe atender (ex.: input_required sem form)."""
+
+
+class ArgumentosIncompletos(Exception):
+    """O pedido não traz um campo que o inputSchema da tool exige.
+
+    Exceção própria (e não ValueError) para não se confundir com o
+    ValidationError do pydantic, que herda de ValueError.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +191,10 @@ class ClienteMCP:
         if isinstance(resultado, InputRequiredResult):
             return _pede_entrada(resultado)
         if isinstance(resultado, CallToolResult):
-            texto = " ".join(getattr(b, "text", "") for b in resultado.content).strip()
             if resultado.is_error:
+                texto = " ".join(getattr(b, "text", "") for b in resultado.content).strip()
                 return FalhaDaTool(mensagem=texto)
-            return Concluido(dados=resultado.structured_content, texto=texto)
+            return Concluido(dados=resultado.structured_content)
         raise ErroDeProtocolo(f"resultado inesperado de tools/call: {type(resultado).__name__}")
 
 
@@ -227,5 +234,5 @@ def montar_argumentos(tool: Tool, campos: dict[str, str]) -> dict[str, Any]:
     propriedades = schema.get("properties") or {}
     faltando = [c for c in schema.get("required", []) if c not in campos]
     if faltando:
-        raise ValueError(f"faltando no pedido: {', '.join(faltando)}")
+        raise ArgumentosIncompletos(f"faltando no pedido: {', '.join(faltando)}")
     return {k: v for k, v in campos.items() if k in propriedades}

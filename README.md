@@ -118,11 +118,11 @@ cd agente && uv run python demo_host_mcp.py sala-garagem 2026-11-03T14:00:00-03:
 
 A ponte fica em [`agente/ponte.py`](agente/ponte.py), na classe `Ponte`.
 
-**Do MCP para o A2A.** Em `Ponte._aplicar` ([`agente/ponte.py:168-170`](agente/ponte.py#L168-L170), marcado com `>>> A PONTE`), o resultado `input_required` do `tools/call` chega como `PedeEntrada`. O agente o enxerga cru porque chama o SDK com `allow_input_required=True` ([`agente/cliente_mcp.py:182`](agente/cliente_mcp.py#L182)), sem callback de elicitation. Ali a Task vai para **`TASK_STATE_INPUT_REQUIRED`** com a linha `alternativas: <ids>`, na ordem do `enum` da elicitation. O `requestState`, a chave do `inputRequests`, os argumentos e o trace ficam guardados em `self._pausas[task_id]`, um dicionário da `Ponte` separado do objeto `Tarefa`. Como só a `Tarefa` é serializada nas respostas A2A, o `requestState` não tem caminho para sair do agente.
+**Do MCP para o A2A.** Em `Ponte._aplicar` ([`agente/ponte.py:167-169`](agente/ponte.py#L167-L169), marcado com `>>> A PONTE`), o resultado `input_required` do `tools/call` chega como `PedeEntrada`. O agente o enxerga cru porque chama o SDK com `allow_input_required=True` ([`agente/cliente_mcp.py:189`](agente/cliente_mcp.py#L189)), sem callback de elicitation. Ali a Task vai para **`TASK_STATE_INPUT_REQUIRED`** com a linha `alternativas: <ids>`, na ordem do `enum` da elicitation. O `requestState`, a chave do `inputRequests`, os argumentos e o trace ficam guardados em `self._pausas[task_id]`, um dicionário da `Ponte` separado do objeto `Tarefa`. Como só a `Tarefa` é serializada nas respostas A2A, o `requestState` não tem caminho para sair do agente.
 
-**Do A2A de volta para o MCP.** Em `Ponte.continuar` ([`agente/ponte.py:118`](agente/ponte.py#L118)), o `SendMessage` com `taskId` e `escolha=<valor>` recupera a pausa daquela Task. A escolha é conferida contra o `enum` recebido: fora dele, a Task continua pausada e repete a linha. Depois vem o retry ([`agente/ponte.py:144-149`](agente/ponte.py#L144-L149)), que repete o `tools/call` original com a mesma tool e os mesmos argumentos, leva `inputResponses` sob a **mesma chave** e o **`requestState` ecoado sem modificação**. O id de JSON-RPC é novo, porque o SDK gera um id por request. `escolha=recusar` vira `action: "decline"`, e a Task termina em `TASK_STATE_CANCELED`.
+**Do A2A de volta para o MCP.** Em `Ponte.continuar` ([`agente/ponte.py:125`](agente/ponte.py#L125)), o `SendMessage` com `taskId` e `escolha=<valor>` recupera a pausa daquela Task. A escolha é conferida contra o `enum` recebido: fora dele, a Task continua pausada e repete a linha. Depois vem o retry ([`agente/ponte.py:151-156`](agente/ponte.py#L151-L156)), que repete o `tools/call` original com a mesma tool e os mesmos argumentos, leva `inputResponses` sob a **mesma chave** e o **`requestState` ecoado sem modificação**. O id de JSON-RPC é novo, porque o SDK gera um id por request. `escolha=recusar` vira `action: "decline"`, e a Task termina em `TASK_STATE_CANCELED`.
 
-Do lado do servidor, quem produz o `input_required` é o resolver `escolha_de_sala` ([`servidor-mcp/servidor.py:146`](servidor-mcp/servidor.py#L146)). Ele devolve `Elicit(...)` quando há conflito, e o SDK transforma isso em `inputRequests` mais um `requestState` selado. O servidor não abre canal de volta: ele **termina a resposta pedindo informação**.
+Do lado do servidor, quem produz o `input_required` é o resolver `escolha_de_sala` ([`servidor-mcp/servidor.py:147`](servidor-mcp/servidor.py#L147)). Ele devolve `Elicit(...)` quando há conflito, e o SDK transforma isso em `inputRequests` mais um `requestState` selado. O servidor não abre canal de volta: ele **termina a resposta pedindo informação**.
 
 ---
 
@@ -130,7 +130,7 @@ Do lado do servidor, quem produz o `input_required` é o resolver `escolha_de_sa
 
 ### Proteção do `requestState`
 
-- **Como:** `RequestStateSecurity(keys=[segredo], ttl=600)` do próprio SDK ([`servidor-mcp/servidor.py:68`](servidor-mcp/servidor.py#L68)). Cada `requestState` emitido é um envelope **AES-256-GCM** (AEAD: cifra e autentica), com a chave derivada de `REQUEST_STATE_SECRET` por HKDF-SHA256.
+- **Como:** `RequestStateSecurity(keys=[segredo], ttl=600)` do próprio SDK ([`servidor-mcp/servidor.py:69`](servidor-mcp/servidor.py#L69)). Cada `requestState` emitido é um envelope **AES-256-GCM** (AEAD: cifra e autentica), com a chave derivada de `REQUEST_STATE_SECRET` por HKDF-SHA256.
 - **O que o envelope amarra:** expiração (`iat`/`exp`), método (`tools/call`), nome da tool, um **digest dos argumentos** e a audiência (o nome do servidor, `central-de-salas`).
 - **Adulteração:** qualquer caractere trocado invalida a tag GCM, e a resposta é `-32602` (`Invalid or expired requestState`). O motivo real vai só para o stderr (`rejected: seal`).
 - **Argumentos trocados no retry:** o digest selado não bate com os argumentos novos, e o servidor **rejeita o estado** com `-32602` (`rejected: request binding`). A divergência nunca toma efeito.
@@ -142,7 +142,7 @@ Do lado do servidor, quem produz o `input_required` é o resolver `escolha_de_sa
 
 - **Tasks:** em memória, no `RegistroDeTarefas` ([`agente/tarefas.py`](agente/tarefas.py)), indexadas por id. Não sobrevivem a restart, o que está fora do escopo.
 - **Máquina de estados:** uma tabela (`TRANSICOES`) impõe o diagrama do enunciado. Uma transição ilegal levanta exceção, e estados terminais (`COMPLETED`, `FAILED`, `CANCELED`) não têm saída. Um `SendMessage` para uma Task terminal é recusado com o erro JSON-RPC `-32004`.
-- **Estado pausado:** por Task, em `Ponte._pausas`. Uma trava (`asyncio.Lock`) por Task serializa as mensagens da mesma Task sem bloquear as outras. Duas Tasks pausadas ao mesmo tempo nunca trocam de `requestState`.
+- **Estado pausado:** por Task, em `Ponte._pausas`. Uma trava (`asyncio.Lock`) na própria `Tarefa` serializa as mensagens da mesma Task sem bloquear as outras. Duas Tasks pausadas ao mesmo tempo nunca trocam de `requestState`.
 - **Reservas:** em memória no servidor MCP ([`servidor-mcp/dominio.py`](servidor-mcp/dominio.py)), começando por `dados/reservas.json`.
 
 ### Outras decisões
@@ -171,7 +171,7 @@ elicitation = (
 
 Além disso, o stamp de cada request **sobrescreve** a capability no `_meta` (`meta[CLIENT_CAPABILITIES_META_KEY] = capabilities`), então não adianta passá-la por request. E registrar um callback faria o `Client` responder a elicitation sozinho, de modo que a Task A2A nunca pausaria.
 
-A solução ([`agente/cliente_mcp.py:109-122`](agente/cliente_mcp.py#L109-L122)) é uma subclasse de `Client` que substitui **apenas** a construção das capabilities da sessão, sem registrar callback. O resto (headers `MCP-Protocol-Version`, `Mcp-Method` e `Mcp-Name`, os campos obrigatórios do `_meta`, ids novos a cada request) continua sendo feito pelo SDK. Como isso usa um método privado, a versão do SDK está travada em `mcp==2.3.0`.
+A solução ([`agente/cliente_mcp.py:116-129`](agente/cliente_mcp.py#L116-L129)) é uma subclasse de `Client` que substitui **apenas** a construção das capabilities da sessão, sem registrar callback. O resto (headers `MCP-Protocol-Version`, `Mcp-Method` e `Mcp-Name`, os campos obrigatórios do `_meta`, ids novos a cada request) continua sendo feito pelo SDK. Como isso usa um método privado, a versão do SDK está travada em `mcp==2.3.0`.
 
 ---
 
@@ -180,7 +180,7 @@ A solução ([`agente/cliente_mcp.py:109-122`](agente/cliente_mcp.py#L109-L122))
 Última execução, com os dois processos recém-iniciados a partir de um clone limpo:
 
 ```text
-trace-id desta execucao: b2af4e5b4ff760b4d6ff9b77502e0968
+trace-id desta execucao: 53cccd265c4baf5c01409299fec27110
 procure esse valor no stderr do servidor MCP para conferir a propagacao do traceparent.
 
 PASS 01 tools/list traz as tres tools
