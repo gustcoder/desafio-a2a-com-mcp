@@ -2,9 +2,11 @@
 name = "agente-central-de-salas"
 version = "1.0.0"
 description = "Agente da Central de Salas: host MCP por dentro, servidor A2A por fora"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "mcp==2.3.0",
+    "starlette==1.10.0",
+    "uvicorn==0.54.0",
 ]
 
 [tool.uv]
